@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/influxdata/influxdb/influxql"
@@ -84,9 +85,17 @@ func buildLogLine(l *responseLogger, r *http.Request, start time.Time) string {
 	username := parseUsername(r)
 
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-
 	if err != nil {
 		host = r.RemoteAddr
+	}
+
+	if xff := r.Header["X-Forwarded-For"]; xff != nil {
+		addrs := make([]string, 0, len(xff)+1)
+		for _, addr := range xff {
+			addrs = append(addrs, addr)
+		}
+		addrs = append(addrs, host)
+		host = strings.Join(addrs, ",")
 	}
 
 	uri := r.URL.RequestURI()
