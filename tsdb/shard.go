@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +17,7 @@ import (
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
 	internal "github.com/influxdata/influxdb/tsdb/internal"
+	"github.com/uber-go/zap"
 )
 
 // monitorStatInterval is the interval at which the shard is inspected
@@ -119,7 +119,7 @@ type Shard struct {
 	stats       *ShardStatistics
 	defaultTags models.StatisticTags
 
-	logger *log.Logger
+	logger zap.Logger
 	// used by logger. Referenced so it can be passed down to new caches.
 	logOutput io.Writer
 
@@ -150,7 +150,7 @@ func NewShard(id uint64, index *DatabaseIndex, path string, walPath string, opti
 		database:        db,
 		retentionPolicy: rp,
 
-		logger:       log.New(os.Stderr, "[shard] ", log.LstdFlags),
+		logger:       zap.New(zap.NullEncoder()),
 		logOutput:    os.Stderr,
 		EnableOnOpen: true,
 	}
@@ -160,14 +160,17 @@ func NewShard(id uint64, index *DatabaseIndex, path string, walPath string, opti
 // SetLogOutput sets the writer to which log output will be written. It is safe
 // for concurrent use.
 func (s *Shard) SetLogOutput(w io.Writer) {
-	s.logger.SetOutput(w)
-	if err := s.ready(); err == nil {
-		s.engine.SetLogOutput(w)
-	}
+}
 
-	s.mu.Lock()
-	s.logOutput = w
-	s.mu.Unlock()
+func (s *Shard) WithLogger(log zap.Logger) {
+	logger := log.With(
+		zap.Uint64("shard", s.id),
+		zap.String("path", s.path),
+	)
+	if err := s.ready(); err == nil {
+		s.engine.WithLogger(logger)
+	}
+	s.logger = logger.With(zap.String("service", "shard"))
 }
 
 // SetEnabled enables the shard for queries and write.  When disabled, all
@@ -246,7 +249,7 @@ func (s *Shard) Open() error {
 		}
 
 		// Set log output on the engine.
-		e.SetLogOutput(s.logOutput)
+		e.WithLogger(s.logger)
 
 		// Disable compactions while loading the index
 		e.SetEnabled(false)
@@ -267,7 +270,7 @@ func (s *Shard) Open() error {
 
 		s.engine = e
 
-		s.logger.Printf("%s database index loaded in %s", s.path, time.Now().Sub(start))
+		s.logger.Info(fmt.Sprintf("%s database index loaded in %s", s.path, time.Now().Sub(start)))
 
 		go s.monitor()
 
@@ -549,7 +552,7 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 		// verify the tags and fields
 		tags := p.Tags()
 		if v := tags.Get(timeBytes); v != nil {
-			s.logger.Printf("dropping tag 'time' from '%s'\n", p.PrecisionString(""))
+			s.logger.Info(fmt.Sprintf("dropping tag 'time' from '%s'\n", p.PrecisionString("")))
 			tags.Delete(timeBytes)
 			p.SetTags(tags)
 		}
@@ -558,7 +561,7 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 		iter := p.FieldIterator()
 		for iter.Next() {
 			if bytes.Equal(iter.FieldKey(), timeBytes) {
-				s.logger.Printf("dropping field 'time' from '%s'\n", p.PrecisionString(""))
+				s.logger.Info(fmt.Sprintf("dropping field 'time' from '%s'\n", p.PrecisionString("")))
 				iter.Delete()
 				continue
 			}
@@ -854,7 +857,7 @@ func (s *Shard) monitor() {
 		case <-t.C:
 			size, err := s.DiskSize()
 			if err != nil {
-				s.logger.Printf("Error collecting shard size: %v", err)
+				s.logger.Info(fmt.Sprintf("Error collecting shard size: %v", err))
 				continue
 			}
 			atomic.StoreInt64(&s.stats.DiskBytes, size)
@@ -873,8 +876,8 @@ func (s *Shard) monitor() {
 
 					// Log at 80, 85, 90-100% levels
 					if perc == 80 || perc == 85 || perc >= 90 {
-						s.logger.Printf("WARN: %d%% of max-values-per-tag limit exceeded: (%d/%d), db=%s shard=%d measurement=%s tag=%s",
-							perc, n, s.options.Config.MaxValuesPerTag, s.database, s.id, m.Name, k)
+						s.logger.Info(fmt.Sprintf("WARN: %d%% of max-values-per-tag limit exceeded: (%d/%d), db=%s shard=%d measurement=%s tag=%s",
+							perc, n, s.options.Config.MaxValuesPerTag, s.database, s.id, m.Name, k))
 					}
 				})
 			}
